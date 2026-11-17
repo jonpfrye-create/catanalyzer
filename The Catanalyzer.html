@@ -1107,6 +1107,9 @@ function pushHistory() {
 }
 function undo() {
     if (state.history.length === 0) return;
+    // The move being undone frees its number; the move that replaces it must
+    // be allowed to write (and overwrite) that row.
+    SYNC._lastMove = null;
     const snap = JSON.parse(state.history.pop());
     state.board = snap.board;
     state.wizard = snap.wizard;
@@ -1160,12 +1163,20 @@ function startMainGameTurns() {
 // MOVE LOG (distinct from rollLog -- "keep logs of both all the dice
 // rolls, as well as all the moves")
 // ══════════════════════════════════════════════════════════════════
-function logMove(text) {
+function logMove(text, what) {
     state.moveLog.unshift({ move: state.moveCounter, text });
     if (state.moveLog.length > 300) state.moveLog.length = 300;
     // The single funnel every mutating action passes through, which is why the
     // decision log hooks here rather than at each call site.
-    try { SYNC.recordDecision(text); } catch (e) { /* never break a move */ }
+    //
+    // `what` names the DECISION a line records -- {type, corner|edge|hex|...}.
+    // Lines without it are bookkeeping ("paid 1 lumber...", "granted
+    // starting resources", turn banners' own text) and write no decision row.
+    // Added 2026-11-09: a build logs two lines for one move ("placed..." then
+    // "paid..."), and the second used to overwrite the first's row as
+    // 'manual' -- a full game in a real browser recorded 285 of 289 rows that
+    // way. See SYNC.recordDecision.
+    try { SYNC.recordDecision(text, what); } catch (e) { /* never break a move */ }
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1233,7 +1244,7 @@ function doPlaceSettlement(corner, color) {
     state.board.buildings[corner] = { owner: color, type: 1 };
     state.board.players[color].numSettlements += 1;
     recomputeVp(state.board.players[color]);
-    logMove(`${state.board.players[color].name} placed a settlement at corner ${corner}` + (violatesDistanceRule ? ' (⚠️ distance-rule warning)' : ''));
+    logMove(`${state.board.players[color].name} placed a settlement at corner ${corner}` + (violatesDistanceRule ? ' (⚠️ distance-rule warning)' : ''), { type:'settlement', corner, color });
     if (violatesDistanceRule) {
         showModeStatus('⚠️ That corner is directly adjacent to an existing settlement -- illegal under the real distance rule. Placed anyway in case this reflects something you actually observed, but double-check for a misclick.');
     }
@@ -1247,7 +1258,7 @@ function doPlaceCity(corner, color) {
     state.board.players[color].numSettlements -= 1;
     state.board.players[color].numCities += 1;
     recomputeVp(state.board.players[color]);
-    logMove(`${state.board.players[color].name} upgraded the settlement at corner ${corner} to a city`);
+    logMove(`${state.board.players[color].name} upgraded the settlement at corner ${corner} to a city`, { type:'city', corner, color });
     return true;
 }
 function doPlaceRoad(edge, color) {
@@ -1255,7 +1266,7 @@ function doPlaceRoad(edge, color) {
     pushHistory();
     state.board.roads[edge] = { owner: color };
     state.board.players[color].numRoads += 1;
-    logMove(`${state.board.players[color].name} built a road (edge ${edge})`);
+    logMove(`${state.board.players[color].name} built a road (edge ${edge})`, { type:'road', edge, color });
     return true;
 }
 function grantSetupResources(corner, color) {
@@ -1332,7 +1343,7 @@ function doMoveRobber(hex, actingColor) {
     pushHistory();
     state.board.robberHex = hex;
     const res = RES_NAMES[state.hexResources[hex]];
-    logMove(`Robber moved to hex ${hex} (${res})`);
+    logMove(`Robber moved to hex ${hex} (${res})`, { type:'robber', hex, color: actingColor });
     // Real rule: moving the robber is only "done" once a steal is resolved,
     // if there's anyone adjacent to steal from -- keeps the mandatory-move
     // gate (state.turn.robberPending) active until doStealFromPlayer (or an
@@ -1386,10 +1397,10 @@ function doBuyDevCard(color, type) {
         deck[assigned] = Math.max(0, (deck[assigned] || 0) - 1);
         player.devHand = player.devHand || makeEmptyDevHand();
         player.devHand[assigned] = (player.devHand[assigned] || 0) + 1;
-        logMove(`${player.name} bought a development card (${DEV_CARD_LABELS[assigned]}, paid ${costSummary(BUILD_COSTS.devcard)})`);
+        logMove(`${player.name} bought a development card (${DEV_CARD_LABELS[assigned]}, paid ${costSummary(BUILD_COSTS.devcard)})`, { type:'devcard', color });
     } else {
         player.devHandUnknown = (player.devHandUnknown || 0) + 1;
-        logMove(`${player.name} bought a development card (unknown type, paid ${costSummary(BUILD_COSTS.devcard)})`);
+        logMove(`${player.name} bought a development card (unknown type, paid ${costSummary(BUILD_COSTS.devcard)})`, { type:'devcard', color });
     }
     recomputeDevCardsInHand(player);
     return true;
@@ -1422,7 +1433,7 @@ function playKnightCard(color) {
     state.turn.devCardPlayedThisTurn = true;
     state.turn.robberPending = true;
     state.mode = 'robber';
-    logMove(`${player.name} played a Knight`);
+    logMove(`${player.name} played a Knight`, { type:'play_knight' });
     return true;
 }
 function playMonopolyCard(color, resourceName) {
@@ -1449,7 +1460,7 @@ function playMonopolyCard(color, resourceName) {
     player.resources[resourceName] = (player.resources[resourceName] || 0) + total;
     recomputeHandSize(player);
     state.turn.devCardPlayedThisTurn = true;
-    logMove(`${player.name} played Monopoly on ${resourceName} (took ${total})`);
+    logMove(`${player.name} played Monopoly on ${resourceName} (took ${total})`, { type:'play_monopoly' });
     return true;
 }
 function playYearOfPlentyCard(color, res1, res2) {
@@ -1464,7 +1475,7 @@ function playYearOfPlentyCard(color, res1, res2) {
     player.resources[res2] = (player.resources[res2] || 0) + 1;
     recomputeHandSize(player);
     state.turn.devCardPlayedThisTurn = true;
-    logMove(`${player.name} played Year of Plenty (took 1 ${res1}, 1 ${res2})`);
+    logMove(`${player.name} played Year of Plenty (took 1 ${res1}, 1 ${res2})`, { type:'play_year_of_plenty' });
     return true;
 }
 function playRoadBuildingCard(color) {
@@ -1478,7 +1489,7 @@ function playRoadBuildingCard(color) {
     state.turn.devCardPlayedThisTurn = true;
     state.turn.freeRoadsRemaining = 2;
     state.mode = 'road';
-    logMove(`${player.name} played Road Building (2 free roads)`);
+    logMove(`${player.name} played Road Building (2 free roads)`, { type:'play_road_building' });
     return true;
 }
 function doMaritimeTrade(give, giveN, receive, color) {
@@ -1497,7 +1508,7 @@ function doMaritimeTrade(give, giveN, receive, color) {
     player.resources[give] -= giveN;
     player.resources[receive] = (player.resources[receive] || 0) + 1;
     recomputeHandSize(player);
-    logMove(`${player.name} traded ${giveN} ${give} for 1 ${receive}`);
+    logMove(`${player.name} traded ${giveN} ${give} for 1 ${receive}`, { type:'trade', give, receive, color });
     return true;
 }
 
@@ -1883,6 +1894,7 @@ const SYNC = {
     url: null, key: null, gameId: null, version: 0,
     status: 'off', lastError: null, readOnly: false,
     _timer: null, _inFlight: false, _shown: null, _pendingTaken: null,
+    _lastMove: null,   // moveCounter of the last decision row written
 
     load() {
         try {
@@ -1994,12 +2006,42 @@ const SYNC = {
     },
 
     // ---- decision log -----------------------------------------------------
+    // A move's identity, independent of how it was entered. The opening
+    // placement lists settlements as 'stage2_settlement'; it is the same move.
+    recKey(r) {
+        return {
+            type: r.type === 'stage2_settlement' ? 'settlement' : r.type,
+            corner: r.corner ?? null, edge: r.edge ?? null, hex: r.hex ?? null,
+            give: r.give ?? r.giveName ?? null,
+            receive: r.receive ?? r.recvName ?? null,
+            target: r.targetId ?? r.target ?? null,
+        };
+    },
+    sameKey(a, b) {
+        return a.type === b.type && a.corner === b.corner && a.edge === b.edge
+            && a.hex === b.hex && a.give === b.give && a.receive === b.receive
+            && a.target === b.target;
+    },
     noteShown(actingColor, recs) {
-        // Ordered exactly as displayed. Only the fields worth keeping: a full
-        // candidate carries board geometry that is already in `state`.
+        // `recs` is {affordable, prospective, robber} as displayed; a bare
+        // array is accepted and treated as one list.
+        const buckets = Array.isArray(recs) ? { affordable: recs } : recs;
+        const flat = [...(buckets.affordable || []), ...(buckets.prospective || []),
+                      ...(buckets.robber || [])];
+        // RANK IS WITHIN ITS OWN LIST. The three lists answer different
+        // questions, and ranking a robber move by its position after ten
+        // build options would make every robber decision look unranked.
+        const index = [];
+        for (const bucket of ['affordable', 'prospective', 'robber']) {
+            (buckets[bucket] || []).forEach((r, i) => {
+                index.push({ key: this.recKey(r), shownType: r.type, bucket, rank: i + 1 });
+            });
+        }
         this._shown = {
-            actingColor,
-            list: recs.slice(0, 8).map(r => ({
+            actingColor, index,
+            // Sent with each row, ordered as displayed. Only the fields worth
+            // keeping: a full candidate carries geometry already in `state`.
+            list: flat.slice(0, 8).map(r => ({
                 type: r.type,
                 pp: (r.pp !== undefined && r.pp !== null) ? Number(r.pp.toFixed(3)) : null,
                 pts: (typeof r.delta === 'number') ? Number(r.delta.toFixed(3)) : null,
@@ -2008,37 +2050,42 @@ const SYNC = {
             })),
         };
     },
+    // A recommendation card was clicked. This records only HOW the next move
+    // is being entered; WHAT the move is comes from logMove's `what`, so a
+    // click that fails (unaffordable, gated) cannot mislabel a later move.
     noteTakenFromRec(r, actingColor) {
-        const list = (this._shown && this._shown.list) || [];
-        const idx = list.findIndex(x => x.type === r.type
-            && (x.corner ?? null) === (r.corner ?? null)
-            && (x.edge ?? null) === (r.edge ?? null)
-            && (x.hex ?? null) === (r.hex ?? null));
-        this._pendingTaken = {
-            type: r.type, actingColor,
-            detail: { corner: r.corner ?? null, edge: r.edge ?? null, hex: r.hex ?? null,
-                      give: r.give ?? r.giveName ?? null, receive: r.receive ?? r.recvName ?? null },
-            rank: idx >= 0 ? idx + 1 : null,
-            followedTop: idx === 0,
-        };
+        this._pendingTaken = { key: this.recKey(r), actingColor };
     },
-    // Every mutating action funnels through logMove(), which is how a move
-    // made by clicking the BOARD (rather than a recommendation card) still
-    // gets recorded -- as taken:'manual', which is itself the interesting
-    // signal: it means the tool's list did not contain what was chosen.
-    recordDecision(text) {
-        if (!this.enabled() || !this._shown) return;
-        const t = this._pendingTaken;
+    // ONE ROW PER MOVE, written by the line that names the decision.
+    //
+    // The rank is found by matching the move against what was shown, so a
+    // move entered by clicking the BOARD is ranked exactly like one entered
+    // by clicking a card -- at a table most moves, and every opponent's, go
+    // in through the board. `takenRank: null` therefore means precisely "the
+    // list did not contain this move", which is the signal worth having.
+    // `takenDetail.via` keeps the card/board distinction separately.
+    recordDecision(text, what) {
+        const pending = this._pendingTaken;
         this._pendingTaken = null;
+        if (!this.enabled() || !this._shown) return;
+        if (!what) return;                               // bookkeeping line
+        if (this._lastMove === state.moveCounter) return; // already recorded
+        this._lastMove = state.moveCounter;
+        const key = this.recKey(what);
+        const sameSeat = what.color == null || what.color === this._shown.actingColor;
+        const hit = sameSeat ? this._shown.index.find(x => this.sameKey(x.key, key)) : null;
+        const via = (pending && this.sameKey(pending.key, key)) ? 'card' : 'board';
         this.queue({
             move: state.moveCounter,
             at: new Date().toISOString(),
-            actingColor: t ? t.actingColor : this._shown.actingColor,
+            actingColor: what.color ?? this._shown.actingColor,
             shown: this._shown.list,
-            takenType: t ? t.type : 'manual',
-            takenDetail: t ? t.detail : { text: String(text).slice(0, 160) },
-            takenRank: t ? t.rank : null,
-            followedTop: t ? t.followedTop : false,
+            takenType: hit ? hit.shownType : what.type,
+            takenDetail: { ...key, via, list: hit ? hit.bucket : null,
+                           shownFor: this._shown.actingColor,
+                           text: String(text).slice(0, 160) },
+            takenRank: hit ? hit.rank : null,
+            followedTop: !!hit && hit.rank === 1 && hit.bucket !== 'prospective',
             winProbs: state.lastWinProbs || null,
         });
     },
@@ -2060,7 +2107,16 @@ const SYNC = {
         await this.request('POST', `/games/${this.gameId}/decisions`, { decisions: q });
         // Cleared only after the server confirms. The write is idempotent, so
         // a dropped RESPONSE costs a duplicate send, never a lost row.
-        try { localStorage.removeItem(SYNC_QUEUE_KEY); } catch (e) {}
+        // Remove only what was SENT: a move made while the request was in the
+        // air queued a row this request did not carry, and clearing the whole
+        // key would drop it silently.
+        try {
+            const sent = new Set(q.map(d => d.move + '|' + d.at));
+            const now = JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY) || '[]');
+            const left = now.filter(d => !sent.has(d.move + '|' + d.at));
+            if (left.length) localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(left));
+            else localStorage.removeItem(SYNC_QUEUE_KEY);
+        } catch (e) {}
     },
 
     queueLength() {
@@ -2589,6 +2645,65 @@ function isNoGainRec(r) {
     return !!r && !r.wins && r.noGain === true;
 }
 
+// ══════════════════════════════════════════════════════════════════
+// TRADE-THEN-BUILD (2026-11-09) -- a bank trade is worth what it unlocks
+// ══════════════════════════════════════════════════════════════════
+// tradeValue below depends only on how scarce the two resources are on this
+// board. It cannot see the hand, so "2 wool -> 1 brick" scored the same
+// whether or not that brick completed a settlement -- and in a real saved
+// position (2026-07-23, Orange: 5 wool, 2 lumber, 1 grain, a wool port, an
+// open settlement spot) the tool ranked the completing trade BELOW ending the
+// turn. The Python side has the same term as pi_det's TRADE_V2, gated on
+// head-to-head win rate (scripts/gate_trade_v2.py).
+//
+// What is added, in the calibrated win-% unit both pieces already carry:
+//
+//     trade.pp += best VP build affordable AFTER  -  best affordable BEFORE
+//
+// SYMMETRIC on purpose: a trade that spends a card an already-affordable
+// settlement or city needed goes DOWN by that build's value. Only settlement
+// and city count (TRADE_V2 "vp"): a road is rarely worth burning three cards
+// for, and counting roads made pi_det prefer the road it could already
+// afford over the settlement one trade away.
+//
+// One trade, one build -- it does not chain two trades. A build that would
+// WIN the game counts as worth more than any other.
+const TRADE_UNLOCK_KINDS = ['settlement', 'city'];
+function applyTradeThenBuild(results, player) {
+    if (!player || !player.resources) return;
+    const worth = (r) => (r.wins ? 1000 : r.pp);
+    const best = {};
+    for (const kind of TRADE_UNLOCK_KINDS) {
+        const cands = results.filter(r => r.type === kind && (r.wins || typeof r.pp === 'number'));
+        cands.sort((a, b) => worth(b) - worth(a));
+        best[kind] = cands[0] || null;
+    }
+    const bestAfforded = (res) => {
+        let top = null;
+        for (const kind of TRADE_UNLOCK_KINDS) {
+            const b = best[kind];
+            if (!b) continue;
+            const ok = Object.entries(BUILD_COSTS[kind]).every(([r, n]) => (res[r] || 0) >= n);
+            if (ok && (!top || worth(b) > worth(top))) top = b;
+        }
+        return top;
+    };
+    const before = bestAfforded(player.resources);
+    for (const r of results) {
+        if (r.type !== 'trade' || typeof r.pp !== 'number') continue;
+        const after = { ...player.resources };
+        after[r.give] = (after[r.give] || 0) - r.giveRate;
+        after[r.receive] = (after[r.receive] || 0) + 1;
+        const a = bestAfforded(after);
+        if (a === before) continue;
+        const gain = (a ? worth(a) : 0) - (before ? worth(before) : 0);
+        r.tradeOnlyPp = r.pp;
+        r.pp += gain;
+        if (gain > 0) r.unlocks = { type: a.type, corner: a.corner, wins: !!a.wins };
+        else r.blocks = { type: before.type, corner: before.corner };
+    }
+}
+
 // Maritime-trade scoring (src/engine/pi_det_player.py's score_turn_action,
 // fit 2026-07-28 via scripts/fit_turn_action_scores.py -- see CLAUDE.md/
 // docs/FRAMEWORK.md's Phase 3 status log for the full methodology and
@@ -2773,7 +2888,7 @@ function doPlayerTrade(giveColor, giveResource, recvColor, recvResource) {
     giver.resources[recvResource] = (giver.resources[recvResource] || 0) + 1;
     recver.resources[giveResource] = (recver.resources[giveResource] || 0) + 1;
     recomputeHandSize(giver); recomputeHandSize(recver);
-    logMove(`${giver.name} traded 1 ${giveResource} to ${recver.name} for 1 ${recvResource}`);
+    logMove(`${giver.name} traded 1 ${giveResource} to ${recver.name} for 1 ${recvResource}`, { type:'propose_trade', give: giveResource, receive: recvResource, target: recvColor, color: giveColor });
     return true;
 }
 
@@ -3694,6 +3809,7 @@ async function computeRecommendations(board, actingColor, onProgress) {
         if (pp !== null) r.pp = pp;
         else if (hasNoMeasuredGain(r.type, r.delta)) r.noGain = true;
     }
+    applyTradeThenBuild(results, board.players[actingColor]);
 
     // Winning moves sort ABOVE anything else regardless of points/% delta --
     // a move that wins the game outright is never meaningfully "outranked"
@@ -3985,7 +4101,8 @@ function endTurn() {
     if (state.turn.robberPending) { showModeStatus('Move the robber (and resolve the steal) before ending the turn.'); return; }
     if (!state.turn.hasRolled) { showModeStatus('Roll the dice before ending the turn.'); return; }
     pushHistory();
-    const finishing = state.board.players[currentTurnColor()]?.name;
+    const finishingColor = currentTurnColor();
+    const finishing = state.board.players[finishingColor]?.name;
     state.turn.turnIndex = (state.turn.turnIndex + 1) % state.turn.turnOrder.length;
     if (state.turn.turnIndex === 0) state.turn.turnNumber += 1;
     state.turn.hasRolled = false;
@@ -3998,7 +4115,7 @@ function endTurn() {
     // that kept as a backup, not removed).
     state.placingColor = nextColor;
     document.getElementById('placingPlayerSelect').value = nextColor;
-    logMove(`— End of ${finishing}'s turn. Turn ${state.turn.turnNumber}: ${state.board.players[nextColor]?.name} —`);
+    logMove(`— End of ${finishing}'s turn. Turn ${state.turn.turnNumber}: ${state.board.players[nextColor]?.name} —`, { type:'end_turn', color: finishingColor });
     renderAll();
     refreshWinProbs();
 }
@@ -4513,7 +4630,13 @@ function recLabel(cand) {
         const num = state.hexNumbers[cand.hex], res = RES_NAMES[state.hexResources[cand.hex]];
         return `Move robber to ${num?num+'-':''}${res}`;
     }
-    if (cand.type==='trade') return `Trade ${cand.giveRate} ${cand.give} → 1 ${cand.receive}`;
+    if (cand.type==='trade') {
+        const base = `Trade ${cand.giveRate} ${cand.give} → 1 ${cand.receive}`;
+        const nm = (x) => (x.type === 'city' ? 'city' : 'settlement') + ` (corner ${x.corner})`;
+        if (cand.unlocks) return base + ` <span class="rec-holdings">→ then build the ${nm(cand.unlocks)}${cand.unlocks.wins ? ' to WIN' : ''}</span>`;
+        if (cand.blocks) return base + ` <span class="rec-holdings">→ spends a card your ${nm(cand.blocks)} needs</span>`;
+        return base;
+    }
     if (cand.type==='propose_trade') {
         // Show what the counterparty holds in BOTH resources (Jon, 2026-08-10).
         // The receiving side is the one that can make a proposal impossible --
@@ -4566,7 +4689,10 @@ function executeRec(r, actingColor) {
     // none of them are executeRec types today -- if one is added, exempt it
     // here explicitly rather than loosening the whole gate.
     if (!state.wizard.active && state.turn.active) {
-        if (state.turn.robberPending) {
+        // A robber card IS how the pending robber gets moved -- gating it
+        // here made every robber recommendation a dead click after a 7
+        // (found 2026-11-09: 68 of 68 in a full browser game).
+        if (state.turn.robberPending && r.type !== 'robber') {
             showModeStatus('Move the robber first.');
             return false;
         }
@@ -4575,12 +4701,12 @@ function executeRec(r, actingColor) {
             return false;
         }
     }
+    SYNC.noteTakenFromRec(r, actingColor);
     if (r.type === 'road') return executeRoadPlacement(r.edge, actingColor);
     // Taken VIA a recommendation card, so the rank is known exactly. A move
     // made by clicking the board instead falls through to logMove()'s
     // 'manual' path -- which is itself informative, since it means the list
     // did not contain what the player chose.
-    SYNC.noteTakenFromRec(r, actingColor);
     if (r.type === 'settlement' || r.type === 'stage2_settlement') return executeSettlementPlacement(r.corner, actingColor);
     if (r.type === 'city') return executeCityPlacement(r.corner, actingColor);
     if (r.type === 'robber') return executeRobberMove(r.hex);
@@ -4829,7 +4955,7 @@ function renderRecCard(el, r, actingColor) {
             renderGameBoard();
         });
         card.addEventListener('click', () => {
-            if (r.type === 'end_turn') { endTurn(); return; }
+            if (r.type === 'end_turn') { SYNC.noteTakenFromRec(r, actingColor); endTurn(); return; }
             // Buying a dev card is never a one-step action -- the real game
             // always requires saying WHICH card was actually drawn (matches
             // the top toolbar's "Buy Dev Card" button). Recommending it used
@@ -4842,6 +4968,7 @@ function renderRecCard(el, r, actingColor) {
                     showModeStatus(`${player?.name || actingColor} can't afford a dev card (needs ${costSummary(BUILD_COSTS.devcard)}).`);
                     return;
                 }
+                SYNC.noteTakenFromRec(r, actingColor);
                 showDevCardPicker();
                 return;
             }
@@ -5394,7 +5521,7 @@ async function runRecommendations(actingColor) {
         const nameMeta = PLAYER_COLOR_PALETTE.find(pc => pc.id === actingColor);
         statusEl.textContent = `${nameMeta?.name || 'Player'}'s hand: ${handText}. Hover a recommendation to preview on the board, click to make the move.`;
         // Record what the player was actually shown, before they act on it.
-        SYNC.noteShown(actingColor, [...affordable, ...prospective, ...robber]);
+        SYNC.noteShown(actingColor, { affordable, prospective, robber });
         renderRecList('recListAffordable', affordable, 'Nothing affordable right now.', actingColor, 3);
         renderRecList('recListProspective', prospective, 'Nothing prospective -- you can already afford everything legal.', actingColor, 1);
         renderRecList('recListRobber', robber, 'Not eligible to move the robber right now (need to have just rolled a 7, or have a dev card in hand).', actingColor, 1);
